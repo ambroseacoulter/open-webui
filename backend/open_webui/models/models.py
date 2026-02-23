@@ -77,6 +77,9 @@ class Model(Base):
         Holds a JSON encoded blob of metadata, see `ModelMeta`.
     """
 
+    # Workspace item type: "model" (default) or "agent"
+    kind = Column(Text, default="model")
+
     is_active = Column(Boolean, default=True)
 
     updated_at = Column(BigInteger)
@@ -91,6 +94,7 @@ class ModelModel(BaseModel):
     name: str
     params: ModelParams
     meta: ModelMeta
+    kind: str = "model"
 
     access_grants: list[AccessGrantModel] = Field(default_factory=list)
 
@@ -134,6 +138,7 @@ class ModelForm(BaseModel):
     name: str
     meta: ModelMeta
     params: ModelParams
+    kind: str = "model"
     access_grants: Optional[list[dict]] = None
     is_active: bool = True
 
@@ -153,6 +158,8 @@ class ModelsTable:
         model_data = ModelModel.model_validate(model).model_dump(
             exclude={"access_grants"}
         )
+        if not model_data.get("kind"):
+            model_data["kind"] = "model"
         model_data["access_grants"] = (
             access_grants
             if access_grants is not None
@@ -200,9 +207,20 @@ class ModelsTable:
                 for model in all_models
             ]
 
-    def get_models(self, db: Optional[Session] = None) -> list[ModelUserResponse]:
+    def get_models(
+        self, kind: str = "model", db: Optional[Session] = None
+    ) -> list[ModelUserResponse]:
         with get_db_context(db) as db:
-            all_models = db.query(Model).filter(Model.base_model_id != None).all()
+            all_models = (
+                db.query(Model)
+                .filter(
+                    and_(
+                        Model.base_model_id != None,
+                        func.coalesce(Model.kind, "model") == kind,
+                    )
+                )
+                .all()
+            )
 
             user_ids = list(set(model.user_id for model in all_models))
             model_ids = [model.id for model in all_models]
@@ -228,9 +246,20 @@ class ModelsTable:
                 )
             return models
 
-    def get_base_models(self, db: Optional[Session] = None) -> list[ModelModel]:
+    def get_base_models(
+        self, kind: str = "model", db: Optional[Session] = None
+    ) -> list[ModelModel]:
         with get_db_context(db) as db:
-            all_models = db.query(Model).filter(Model.base_model_id == None).all()
+            all_models = (
+                db.query(Model)
+                .filter(
+                    and_(
+                        Model.base_model_id == None,
+                        func.coalesce(Model.kind, "model") == kind,
+                    )
+                )
+                .all()
+            )
             model_ids = [model.id for model in all_models]
             grants_map = AccessGrants.get_grants_by_resources("model", model_ids, db=db)
             return [
@@ -241,9 +270,13 @@ class ModelsTable:
             ]
 
     def get_models_by_user_id(
-        self, user_id: str, permission: str = "write", db: Optional[Session] = None
+        self,
+        user_id: str,
+        permission: str = "write",
+        kind: str = "model",
+        db: Optional[Session] = None,
     ) -> list[ModelUserResponse]:
-        models = self.get_models(db=db)
+        models = self.get_models(kind=kind, db=db)
         user_group_ids = {
             group.id for group in Groups.get_groups_by_member_id(user_id, db=db)
         }
@@ -274,6 +307,7 @@ class ModelsTable:
     def search_models(
         self,
         user_id: str,
+        kind: str = "model",
         filter: dict = {},
         skip: int = 0,
         limit: int = 30,
@@ -282,7 +316,12 @@ class ModelsTable:
         with get_db_context(db) as db:
             # Join GroupMember so we can order by group_id when requested
             query = db.query(Model, User).outerjoin(User, User.id == Model.user_id)
-            query = query.filter(Model.base_model_id != None)
+            query = query.filter(
+                and_(
+                    Model.base_model_id != None,
+                    func.coalesce(Model.kind, "model") == kind,
+                )
+            )
 
             if filter:
                 query_key = filter.get("query")
@@ -471,8 +510,12 @@ class ModelsTable:
     ) -> list[ModelModel]:
         try:
             with get_db_context(db) as db:
-                # Get existing models
-                existing_models = db.query(Model).all()
+                # Get existing workspace models only (exclude agents).
+                existing_models = (
+                    db.query(Model)
+                    .filter(func.coalesce(Model.kind, "model") == "model")
+                    .all()
+                )
                 existing_ids = {model.id for model in existing_models}
 
                 # Prepare a set of new model IDs
@@ -485,6 +528,7 @@ class ModelsTable:
                             {
                                 **model.model_dump(exclude={"access_grants"}),
                                 "user_id": user_id,
+                                "kind": "model",
                                 "updated_at": int(time.time()),
                             }
                         )
@@ -493,6 +537,7 @@ class ModelsTable:
                             **{
                                 **model.model_dump(exclude={"access_grants"}),
                                 "user_id": user_id,
+                                "kind": "model",
                                 "updated_at": int(time.time()),
                             }
                         )
@@ -509,7 +554,11 @@ class ModelsTable:
 
                 db.commit()
 
-                all_models = db.query(Model).all()
+                all_models = (
+                    db.query(Model)
+                    .filter(func.coalesce(Model.kind, "model") == "model")
+                    .all()
+                )
                 model_ids = [model.id for model in all_models]
                 grants_map = AccessGrants.get_grants_by_resources(
                     "model", model_ids, db=db
