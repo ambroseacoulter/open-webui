@@ -70,6 +70,10 @@ code {
 	border-radius: 2px;
 }
 
+img.rounded-full {
+    object-fit: cover;
+}
+
 .font-secondary {
 	font-family: 'InstrumentSerif', sans-serif;
 }
