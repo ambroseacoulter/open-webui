@@ -1148,6 +1148,7 @@ async def chat_completion_tools_handler(
                                     "action": "agent_spawn",
                                     "description": f"Spawning agent {agent_name}",
                                     "agent": agent_name,
+                                    "agent_id": tool.get("agent_id", ""),
                                     "done": False,
                                 },
                             }
@@ -1191,6 +1192,7 @@ async def chat_completion_tools_handler(
                                     "action": "agent_spawn",
                                     "description": f"Agent {agent_name} spawned",
                                     "agent": agent_name,
+                                    "agent_id": tool.get("agent_id", "") if tool else "",
                                     "done": True,
                                 },
                             }
@@ -1232,23 +1234,39 @@ async def chat_completion_tools_handler(
                 if tool_result:
                     tool = tools[tool_function_name]
                     tool_id = tool.get("tool_id", "")
+                    is_workspace_agent = tool.get("type") == "workspace_agent"
 
-                    tool_name = (
-                        f"{tool_id}/{tool_function_name}"
-                        if tool_id
-                        else f"{tool_function_name}"
-                    )
+                    # For workspace agent tools, extract embedded citation
+                    # sources/annotations and promote them to first-class
+                    # citation entries so the UI renders proper inline refs.
+                    if is_workspace_agent and isinstance(tool_result, str):
+                        from open_webui.utils.tools import (
+                            extract_agent_citations_from_tool_result,
+                        )
 
-                    # Citation is enabled for this tool
+                        tool_result, agent_citations = (
+                            extract_agent_citations_from_tool_result(tool_result)
+                        )
+                        sources.extend(agent_citations)
+
+                    if is_workspace_agent:
+                        tool_name = tool.get(
+                            "agent_name", tool_function_name
+                        )
+                    elif tool_id:
+                        tool_name = f"{tool_id}/{tool_function_name}"
+                    else:
+                        tool_name = tool_function_name
+
                     sources.append(
                         {
                             "source": {
-                                "name": (f"{tool_name}"),
+                                "name": tool_name,
                             },
                             "document": [str(tool_result)],
                             "metadata": [
                                 {
-                                    "source": (f"{tool_name}"),
+                                    "source": tool_name,
                                     "parameters": tool_function_params,
                                 }
                             ],
@@ -2339,8 +2357,19 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # request body, skip all server-side tool resolution and pass the caller's
     # tools through to the model unchanged.
     if not payload_tools:
-        # Server side tools
-        tool_ids = metadata.get("tool_ids", None)
+        # Server side tools – merge request tool_ids with model-configured
+        # toolIds / agentIds so that tools activated on the workspace model
+        # are always included even when the frontend omits them.
+        request_tool_ids = metadata.get("tool_ids", None) or []
+        model_meta = model.get("info", {}).get("meta", {}) if model else {}
+        model_tool_ids = model_meta.get("toolIds", []) or []
+        model_agent_ids = [
+            f"agent:{aid}" if not aid.startswith("agent:") else aid
+            for aid in (model_meta.get("agentIds", []) or [])
+        ]
+        tool_ids = list(
+            dict.fromkeys([*request_tool_ids, *model_tool_ids, *model_agent_ids])
+        ) or None
         # Client side tools
         direct_tool_servers = metadata.get("tool_servers", None)
 
@@ -2564,16 +2593,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     {"type": "function", "function": tool.get("spec", {})}
                     for tool in tools_dict.values()
                 ]
-
-        else:
-            # If the function calling is not native, then call the tools function calling handler
-            try:
-                form_data, flags = await chat_completion_tools_handler(
-                    request, form_data, extra_params, user, models, tools_dict
-                )
-                sources.extend(flags.get("sources", []))
-            except Exception as e:
-                log.exception(e)
+            else:
+                # If the function calling is not native, then call the tools function calling handler
+                try:
+                    form_data, flags = await chat_completion_tools_handler(
+                        request, form_data, extra_params, user, models, tools_dict
+                    )
+                    sources.extend(flags.get("sources", []))
+                except Exception as e:
+                    log.exception(e)
 
     # Check if file context extraction is enabled for this model (default True)
     file_context_enabled = (
@@ -4128,6 +4156,7 @@ async def streaming_chat_response_handler(response, ctx):
                                             "action": "agent_spawn",
                                             "description": f"Spawning agent {agent_name}",
                                             "agent": agent_name,
+                                            "agent_id": tool.get("agent_id", ""),
                                             "done": False,
                                         },
                                     }
@@ -4188,6 +4217,7 @@ async def streaming_chat_response_handler(response, ctx):
                                                 "action": "agent_spawn",
                                                 "description": f"Agent {agent_name} spawned",
                                                 "agent": agent_name,
+                                                "agent_id": tool.get("agent_id", "") if tool else "",
                                                 "done": True,
                                             },
                                         }
@@ -4206,7 +4236,29 @@ async def streaming_chat_response_handler(response, ctx):
                         )
 
                         # Extract citation sources from tool results
-                        if (
+                        is_workspace_agent = (
+                            tool.get("type") == "workspace_agent" if tool else False
+                        )
+
+                        if is_workspace_agent and tool_result:
+                            try:
+                                from open_webui.utils.tools import (
+                                    extract_agent_citations_from_tool_result,
+                                )
+
+                                cleaned_result, agent_citations = (
+                                    extract_agent_citations_from_tool_result(
+                                        tool_result
+                                    )
+                                )
+                                tool_result = cleaned_result
+                                tool_call_sources.extend(agent_citations)
+                            except Exception as e:
+                                log.exception(
+                                    f"Error extracting agent citations: {e}"
+                                )
+
+                        elif (
                             tool_function_name
                             in [
                                 "search_web",

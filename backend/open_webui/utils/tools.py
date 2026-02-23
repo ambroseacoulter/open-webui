@@ -180,21 +180,38 @@ def extract_workspace_model_tool_sources(
     return normalized_sources
 
 
+def _normalize_annotation(annotation: dict) -> dict:
+    """Flatten nested OpenAI annotation formats into a uniform shape.
+
+    Chat Completions API returns:
+      {"type": "url_citation", "url_citation": {"url": "...", "title": "...", ...}}
+    Responses API returns:
+      {"type": "url_citation", "url": "...", "title": "...", ...}
+
+    This normalises both into the flat Responses-style dict.
+    """
+    ann_type = annotation.get("type", "")
+    nested = annotation.get(ann_type)
+    if isinstance(nested, dict):
+        return {"type": ann_type, **nested}
+    return annotation
+
+
 def extract_workspace_model_tool_annotations(
     response_payload: dict | list | str,
 ) -> list[dict]:
     if not isinstance(response_payload, dict):
         return []
 
-    annotations: list[dict] = []
+    raw_annotations: list[dict] = []
 
     choices = response_payload.get("choices", [])
     if isinstance(choices, list) and choices:
         message = choices[0].get("message", {})
         message_annotations = message.get("annotations", [])
         if isinstance(message_annotations, list):
-            annotations.extend(
-                [annotation for annotation in message_annotations if isinstance(annotation, dict)]
+            raw_annotations.extend(
+                [a for a in message_annotations if isinstance(a, dict)]
             )
 
     output = response_payload.get("output", [])
@@ -209,11 +226,113 @@ def extract_workspace_model_tool_annotations(
                     continue
                 content_annotations = content_item.get("annotations", [])
                 if isinstance(content_annotations, list):
-                    annotations.extend(
-                        [annotation for annotation in content_annotations if isinstance(annotation, dict)]
+                    raw_annotations.extend(
+                        [a for a in content_annotations if isinstance(a, dict)]
                     )
 
-    return annotations
+    return [_normalize_annotation(a) for a in raw_annotations]
+
+
+def _get_annotation_url_and_title(annotation: dict) -> tuple[str, str]:
+    """Extract url and title from an annotation dict, handling both flat
+    (Responses API) and nested (Chat Completions API) formats."""
+    url = annotation.get("url", "")
+    title = annotation.get("title", "")
+
+    if not url:
+        ann_type = annotation.get("type", "")
+        nested = annotation.get(ann_type)
+        if isinstance(nested, dict):
+            url = nested.get("url", "")
+            title = title or nested.get("title", "")
+
+    return url, title or url
+
+
+def extract_agent_citations_from_tool_result(
+    tool_result: str,
+) -> tuple[str, list[dict]]:
+    """Parse embedded [Agent Sources JSON] and [Agent Annotations JSON] sections
+    out of a workspace-agent tool result string.
+
+    Returns (cleaned_result, citation_sources) where citation_sources are in the
+    Open WebUI source format ready for direct use as citation events.
+    """
+    if not isinstance(tool_result, str):
+        return tool_result, []
+
+    citation_sources: list[dict] = []
+    cleaned = tool_result
+
+    sources_marker = "[Agent Sources JSON]"
+    annotations_marker = "[Agent Annotations JSON]"
+
+    sources_idx = cleaned.find(sources_marker)
+    annotations_idx = cleaned.find(annotations_marker)
+
+    agent_sources_json = ""
+    agent_annotations_json = ""
+
+    if sources_idx != -1:
+        sources_start = sources_idx + len(sources_marker)
+        sources_end = annotations_idx if annotations_idx > sources_idx else len(cleaned)
+        agent_sources_json = cleaned[sources_start:sources_end].strip()
+
+    if annotations_idx != -1:
+        annotations_start = annotations_idx + len(annotations_marker)
+        next_section = len(cleaned)
+        if sources_idx > annotations_idx:
+            next_section = sources_idx
+        agent_annotations_json = cleaned[annotations_start:next_section].strip()
+
+    # Strip both marker sections from the result text
+    if sources_idx != -1 or annotations_idx != -1:
+        cut_start = min(
+            idx for idx in [sources_idx, annotations_idx] if idx != -1
+        )
+        cleaned = cleaned[:cut_start].rstrip()
+
+    # Parse agent sources (already in Open WebUI source format)
+    if agent_sources_json:
+        try:
+            parsed_sources = json.loads(agent_sources_json)
+            if isinstance(parsed_sources, list):
+                for src in parsed_sources:
+                    if isinstance(src, dict) and src.get("source"):
+                        citation_sources.append(src)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Parse agent annotations (OpenAI-style, flat or nested) and convert to sources
+    if agent_annotations_json:
+        try:
+            parsed_annotations = json.loads(agent_annotations_json)
+            if isinstance(parsed_annotations, list):
+                seen_urls = {
+                    s.get("source", {}).get("id", "")
+                    for s in citation_sources
+                    if s.get("source", {}).get("id")
+                }
+                for annotation in parsed_annotations:
+                    if not isinstance(annotation, dict):
+                        continue
+                    url, title = _get_annotation_url_and_title(annotation)
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    citation_sources.append(
+                        {
+                            "source": {"name": title, "id": url, "url": url},
+                            "document": [
+                                annotation.get("text", title)
+                            ],
+                            "metadata": [{"source": url, "name": title}],
+                        }
+                    )
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return cleaned, citation_sources
 
 
 def parse_response_to_payload(response: Any) -> dict | list | str:
@@ -631,6 +750,7 @@ async def get_tools(
                 "callable": callable,
                 "spec": spec,
                 "type": "workspace_agent",
+                "agent_id": target_model_id,
                 "agent_name": target_model.get("name", target_model_id),
                 "display_name": f"Spawn Agent: {target_model.get('name', target_model_id)}",
             }

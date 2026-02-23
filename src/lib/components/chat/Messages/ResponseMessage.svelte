@@ -172,6 +172,16 @@
 	];
 	$: messageAgents = [...new Set([...(message?.agents ?? []), ...agentsFromSources])];
 
+	// Build agent name -> id map from statusHistory when agentIds not persisted (e.g. loaded from DB)
+	$: agentIdsForPill = (() => {
+		const fromMessage = message?.agentIds ?? {};
+		const statusList = message?.statusHistory ?? message?.status_history ?? [];
+		const fromHistory = statusList
+			.filter((e) => e?.action === 'agent_spawn' && e?.agent && (e?.agent_id ?? e?.agentId))
+			.reduce((acc, e) => ({ ...acc, [e.agent]: e.agent_id ?? e.agentId }), {});
+		return { ...fromHistory, ...fromMessage };
+	})();
+
 	let edit = false;
 	let editedContent = '';
 	let editTextAreaElement: HTMLTextAreaElement;
@@ -849,7 +859,7 @@
 									{/if}
 
 									{#if message?.done && messageAgents.length > 0}
-										<AgentsUsed agents={messageAgents} />
+										<AgentsUsed agents={messageAgents} agentIds={agentIdsForPill} />
 									{/if}
 								</div>
 							{/if}

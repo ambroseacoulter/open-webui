@@ -422,6 +422,9 @@
 
 					if (data?.action === 'agent_spawn' && data?.agent) {
 						message.agents = [...new Set([...(message?.agents ?? []), data.agent])];
+						if (data?.agent_id) {
+							message.agentIds = { ...(message?.agentIds ?? {}), [data.agent]: data.agent_id };
+						}
 					}
 				} else if (type === 'chat:completion') {
 					chatCompletionEventHandler(data, message, event.chat_id);

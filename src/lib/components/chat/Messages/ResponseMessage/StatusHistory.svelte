@@ -37,19 +37,23 @@
 			}
 
 			if (event?.done === false) {
-				activeAgentMap.set(agentName, true);
+				activeAgentMap.set(agentName, event?.agent_id ?? '');
 			} else if (event?.done === true) {
 				activeAgentMap.delete(agentName);
 			}
 		}
 
-		activeAgents = [...activeAgentMap.keys()];
+		activeAgents = [...activeAgentMap.entries()].map(([name, id]) => ({ name, agent_id: id }));
 		visibleHistory = (history ?? []).filter((item) => item?.action !== 'agent_spawn');
 		status = visibleHistory.length > 0 ? visibleHistory.at(-1) : null;
 	}
 
-	const getAgentImageUrl = (agentName) => {
-		const model = ($models ?? []).find((m) => m?.name === agentName);
+	const getAgentImageUrl = (agent) => {
+		if (agent.agent_id) {
+			return `${WEBUI_API_BASE_URL}/models/model/profile/image?id=${encodeURIComponent(agent.agent_id)}&lang=${$i18n.language}`;
+		}
+
+		const model = ($models ?? []).find((m) => m?.name === agent.name);
 		if (model?.id) {
 			return `${WEBUI_API_BASE_URL}/models/model/profile/image?id=${encodeURIComponent(model.id)}&lang=${$i18n.language}`;
 		}
@@ -85,16 +89,16 @@
 			{#if activeAgents && activeAgents.length > 0}
 				<div class="mt-1">
 					<div class="flex flex-wrap gap-2">
-						{#each activeAgents as agent}
-							<div class="inline-flex items-center gap-1.5 text-xs font-medium">
-								<img
-									src={getAgentImageUrl(agent)}
-									alt={agent}
-									class="size-4 rounded-full object-cover shrink-0"
-								/>
-								<span class="shimmer text-sky-700 dark:text-sky-300">{agent}</span>
-							</div>
-						{/each}
+					{#each activeAgents as agent}
+						<div class="inline-flex items-center gap-1.5 text-xs font-medium">
+							<img
+								src={getAgentImageUrl(agent)}
+								alt={agent.name}
+								class="size-4 rounded-full object-cover shrink-0"
+							/>
+							<span class="shimmer text-sky-700 dark:text-sky-300">{agent.name}</span>
+						</div>
+					{/each}
 					</div>
 				</div>
 			{/if}

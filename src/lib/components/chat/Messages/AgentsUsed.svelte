@@ -6,11 +6,17 @@
 	const i18n = getContext('i18n');
 
 	export let agents: string[] = [];
+	export let agentIds: Record<string, string> = {};
 
 	let showAgents = false;
 	$: uniqueAgents = [...new Set((agents ?? []).filter(Boolean))];
 
 	const getAgentImageUrl = (agentName: string) => {
+		const agentId = agentIds?.[agentName];
+		if (agentId) {
+			return `${WEBUI_API_BASE_URL}/models/model/profile/image?id=${encodeURIComponent(agentId)}&lang=${$i18n.language}`;
+		}
+
 		const model = ($models ?? []).find((m) => m?.name === agentName);
 		if (model?.id) {
 			return `${WEBUI_API_BASE_URL}/models/model/profile/image?id=${encodeURIComponent(model.id)}&lang=${$i18n.language}`;
